@@ -2,8 +2,10 @@ package unsw.trains;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import unsw.exceptions.InvalidRouteException;
@@ -22,6 +24,7 @@ public class TrainsController {
     private final Map<String, Station> stations;
     private final Map<String, Track> tracks;
     private final Map<String, Train> trains;
+    private final Set<String> tracksJustBroken; // Track which tracks just broke this tick
 
     /**
      * Helper class to store track and load weight for damage calculation.
@@ -42,6 +45,7 @@ public class TrainsController {
         this.stations = new HashMap<>();
         this.tracks = new HashMap<>();
         this.trains = new HashMap<>();
+        this.tracksJustBroken = new HashSet<>();
     }
 
     public void createStation(String stationId, String type, double x, double y) {
@@ -251,11 +255,54 @@ public class TrainsController {
         // Third: Disembark loads that reached their destination
         disembarkLoadsFromTrains();
 
-        // Fourth: Damage tracks using weight from BEFORE disembarking
+        // Fourth: Handle perishable cargo expiration
+        handlePerishableCargoExpiration();
+
+        // Fifth: Damage tracks using weight from BEFORE disembarking
         damageTracksFromTrainMovement(trainTrackMovements);
 
-        // Fifth: Repair broken tracks
+        // Sixth: Repair broken tracks (but not tracks that just broke this tick)
         repairBrokenTracks();
+        
+        // Seventh: Clear the tracks that just broke for next tick
+        tracksJustBroken.clear();
+    }
+
+    /**
+     * Handle expiration of perishable cargo.
+     */
+    private void handlePerishableCargoExpiration() {
+        // Handle perishable cargo at stations
+        for (Station station : stations.values()) {
+            List<Load> loadsToRemove = new ArrayList<>();
+            for (Load load : station.getLoads()) {
+                if (load instanceof PerishableCargo) {
+                    PerishableCargo perishable = (PerishableCargo) load;
+                    if (perishable.tick()) {
+                        loadsToRemove.add(load);
+                    }
+                }
+            }
+            for (Load load : loadsToRemove) {
+                station.removeLoad(load);
+            }
+        }
+        
+        // Handle perishable cargo on trains
+        for (Train train : trains.values()) {
+            List<Load> loadsToRemove = new ArrayList<>();
+            for (Load load : train.getLoads()) {
+                if (load instanceof PerishableCargo) {
+                    PerishableCargo perishable = (PerishableCargo) load;
+                    if (perishable.tick()) {
+                        loadsToRemove.add(load);
+                    }
+                }
+            }
+            for (Load load : loadsToRemove) {
+                train.removeLoad(load);
+            }
+        }
     }
 
     /**
@@ -430,6 +477,16 @@ public class TrainsController {
                 continue;
             }
 
+            // Special check for perishable cargo
+            if (load instanceof PerishableCargo) {
+                PerishableCargo perishable = (PerishableCargo) load;
+                // Simple check: only embark if it has time left
+                // More sophisticated implementation would calculate exact travel time
+                if (perishable.getMinsTillPerish() <= 0) {
+                    continue;
+                }
+            }
+
             // All checks passed - embark this load
             loadsToEmbark.add(load);
         }
@@ -467,7 +524,15 @@ public class TrainsController {
             int totalWeight = damageInfo.loadWeight;
 
             int damage = 1 + (int) Math.ceil((double) totalWeight / 1000.0);
+            
+            // Check if track will break this tick
+            TrackType oldType = damageInfo.track.getType();
             damageInfo.track.damage(damage);
+            
+            // If track just broke (went from UNBROKEN to BROKEN), mark it
+            if (oldType == TrackType.UNBROKEN && damageInfo.track.getType() == TrackType.BROKEN) {
+                tracksJustBroken.add(damageInfo.track.getTrackId());
+            }
         }
     }
 
@@ -484,7 +549,8 @@ public class TrainsController {
 
                 // Check if repair train is on a track (not at station)
                 Track track = tracks.get(currentLocation);
-                if (track != null && track.getType() == TrackType.BROKEN) {
+                if (track != null && track.getType() == TrackType.BROKEN 
+                    && !tracksJustBroken.contains(track.getTrackId())) {
                     // Apply mechanic boost (2 per mechanic)
                     int mechanicCount = repairTrain.getMechanicCount();
                     if (mechanicCount > 0) {
@@ -496,8 +562,9 @@ public class TrainsController {
         }
 
         // Then, apply base repair to all broken tracks (1 per tick)
+        // But NOT to tracks that just broke this tick
         for (Track track : tracks.values()) {
-            if (track.getType() == TrackType.BROKEN) {
+            if (track.getType() == TrackType.BROKEN && !tracksJustBroken.contains(track.getTrackId())) {
                 track.repair(1); // Base repair rate
             }
         }
