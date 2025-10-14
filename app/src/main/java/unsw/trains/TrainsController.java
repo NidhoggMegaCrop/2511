@@ -24,12 +24,10 @@ public class TrainsController {
     private final Map<String, Station> stations;
     private final Map<String, Track> tracks;
     private final Map<String, Train> trains;
-    private final Set<String> tracksJustBroken; // Track which tracks just broke this tick
+    private final Set<String> tracksJustBroken;
 
     /**
      * Helper class to store track and load weight for damage calculation.
-     * This is needed because we calculate damage AFTER disembarking, but we need
-     * the weight from BEFORE disembarking.
      */
     private static class TrackDamageInfo {
         private final Track track;
@@ -231,18 +229,14 @@ public class TrainsController {
     }
 
     public void simulate() {
-        // First: Embark loads at stations
         embarkLoadsAtStations();
 
-        // Second: Move all trains and record track usage
-        // IMPORTANT: Record load weight BEFORE disembarking for damage calculation
         List<Train> trainsList = new ArrayList<>(trains.values());
         trainsList.sort((t1, t2) -> t1.getTrainId().compareTo(t2.getTrainId()));
 
         Map<Train, TrackDamageInfo> trainTrackMovements = new HashMap<>();
 
         for (Train train : trainsList) {
-            // Record weight before movement (for damage calculation later)
             int loadWeightBeforeMove = train.getLoads().stream().mapToInt(Load::getWeight).sum();
 
             Track usedTrack = moveTrain(train);
@@ -252,19 +246,14 @@ public class TrainsController {
             }
         }
 
-        // Third: Disembark loads that reached their destination
         disembarkLoadsFromTrains();
 
-        // Fourth: Handle perishable cargo expiration
         handlePerishableCargoExpiration();
 
-        // Fifth: Damage tracks using weight from BEFORE disembarking
         damageTracksFromTrainMovement(trainTrackMovements);
 
-        // Sixth: Repair broken tracks (but not tracks that just broke this tick)
         repairBrokenTracks();
-        
-        // Seventh: Clear the tracks that just broke for next tick
+
         tracksJustBroken.clear();
     }
 
@@ -272,7 +261,6 @@ public class TrainsController {
      * Handle expiration of perishable cargo.
      */
     private void handlePerishableCargoExpiration() {
-        // Handle perishable cargo at stations
         for (Station station : stations.values()) {
             List<Load> loadsToRemove = new ArrayList<>();
             for (Load load : station.getLoads()) {
@@ -287,8 +275,6 @@ public class TrainsController {
                 station.removeLoad(load);
             }
         }
-        
-        // Handle perishable cargo on trains
         for (Train train : trains.values()) {
             List<Load> loadsToRemove = new ArrayList<>();
             for (Load load : train.getLoads()) {
@@ -307,7 +293,6 @@ public class TrainsController {
 
     /**
      * Move a single train toward its next station.
-     * Returns the track used if the train completed traversal, null otherwise.
      */
     private Track moveTrain(Train train) {
         String currentLocation = train.getCurrentLocation();
@@ -322,7 +307,6 @@ public class TrainsController {
 
     /**
      * Handle train departing from a station.
-     * Returns the track used if train reached the destination station.
      */
     private Track departFromStation(Train train) {
         Station currentStation = stations.get(train.getCurrentLocation());
@@ -333,36 +317,31 @@ public class TrainsController {
             return null;
         }
 
-        // Check if the track to next station exists
         Track track = findTrackBetween(train.getCurrentLocation(), nextStationId);
         if (track == null) {
             return null;
         }
 
-        // Check if track is broken and train cannot use it
         if (track.getType() == TrackType.BROKEN && !canMoveOnBrokenTrack(train)) {
-            return null; // Train waits at station
+            return null;
         }
 
         boolean reachedStation = train.move(nextStation);
 
         if (reachedStation) {
-            // Train reached destination - this is when we damage the track
             currentStation.removeTrain(train);
             nextStation.addTrain(train);
             train.setCurrentLocation(nextStationId);
-            return track; // Return track for damage calculation
+            return track;
         } else {
-            // Train is now on the track
             currentStation.removeTrain(train);
             train.setCurrentLocation(track.getTrackId());
-            return null; // No damage yet, train still moving
+            return null;
         }
     }
 
     /**
      * Handle train continuing to move on a track.
-     * Returns the track if train reached station (for damage calculation).
      */
     private Track moveTrainOnTrack(Train train) {
         String currentStationInRoute = train.getRoute().getCurrentStationId();
@@ -372,16 +351,14 @@ public class TrainsController {
             return null;
         }
 
-        // Get the track the train is currently on
         Track currentTrack = tracks.get(train.getCurrentLocation());
 
         boolean reachedStation = train.move(destinationStation);
 
         if (reachedStation) {
-            // Train reached destination - damage the track it was on
             destinationStation.addTrain(train);
             train.setCurrentLocation(currentStationInRoute);
-            return currentTrack; // Return the track for damage calculation
+            return currentTrack;
         }
 
         return null; // Still moving on track
@@ -423,7 +400,6 @@ public class TrainsController {
         for (Train train : trains.values()) {
             String currentLocation = train.getCurrentLocation();
 
-            // Only disembark if train is at a station
             if (stations.containsKey(currentLocation)) {
                 Station station = stations.get(currentLocation);
                 disembarkLoads(train, station);
@@ -443,10 +419,8 @@ public class TrainsController {
             }
         }
 
-        // Remove all disembarking loads
         for (Load load : loadsToRemove) {
             train.removeLoad(load);
-            // Load is removed from system (not added back to station)
         }
     }
 
@@ -454,44 +428,32 @@ public class TrainsController {
      * Embark loads from station onto train if appropriate.
      */
     private void embarkLoads(Train train, Station station) {
-        // Get all loads at station, sorted lexicographically
         List<Load> loadsAtStation = new ArrayList<>(station.getLoads());
         loadsAtStation.sort((l1, l2) -> l1.getLoadId().compareTo(l2.getLoadId()));
 
         List<Load> loadsToEmbark = new ArrayList<>();
-
-        // Try to embark each load
         for (Load load : loadsAtStation) {
-            // Check if train can carry this type of load
             if (!train.canCarryLoad(load)) {
                 continue;
             }
 
-            // Check if train has capacity
             if (!train.hasCapacityFor(load)) {
                 continue;
             }
 
-            // Check if train will visit the load's destination
             if (!trainWillVisitStation(train, load.getDestStationId())) {
                 continue;
             }
 
-            // Special check for perishable cargo
             if (load instanceof PerishableCargo) {
                 PerishableCargo perishable = (PerishableCargo) load;
-                // Simple check: only embark if it has time left
-                // More sophisticated implementation would calculate exact travel time
                 if (perishable.getMinsTillPerish() <= 0) {
                     continue;
                 }
             }
-
-            // All checks passed - embark this load
             loadsToEmbark.add(load);
         }
 
-        // Embark all selected loads
         for (Load load : loadsToEmbark) {
             station.removeLoad(load);
             train.addLoad(load);
@@ -508,28 +470,18 @@ public class TrainsController {
 
     /**
      * Damage tracks based on train movements.
-     * Uses weight from BEFORE disembarking.
      */
     private void damageTracksFromTrainMovement(Map<Train, TrackDamageInfo> trainTrackMovements) {
         for (Map.Entry<Train, TrackDamageInfo> entry : trainTrackMovements.entrySet()) {
             Train train = entry.getKey();
             TrackDamageInfo damageInfo = entry.getValue();
-
-            // RepairTrains don't damage tracks
             if (train instanceof RepairTrain) {
                 continue;
             }
-
-            // Calculate damage based on load weight from BEFORE disembarking
             int totalWeight = damageInfo.loadWeight;
-
             int damage = 1 + (int) Math.ceil((double) totalWeight / 1000.0);
-            
-            // Check if track will break this tick
             TrackType oldType = damageInfo.track.getType();
             damageInfo.track.damage(damage);
-            
-            // If track just broke (went from UNBROKEN to BROKEN), mark it
             if (oldType == TrackType.UNBROKEN && damageInfo.track.getType() == TrackType.BROKEN) {
                 tracksJustBroken.add(damageInfo.track.getTrackId());
             }
@@ -538,20 +490,15 @@ public class TrainsController {
 
     /**
      * Repair broken tracks.
-     * First apply mechanic boosts, then apply base repair to all broken tracks.
      */
     private void repairBrokenTracks() {
-        // First, apply mechanic repair boosts for RepairTrains ON broken tracks
         for (Train train : trains.values()) {
             if (train instanceof RepairTrain) {
                 RepairTrain repairTrain = (RepairTrain) train;
                 String currentLocation = repairTrain.getCurrentLocation();
-
-                // Check if repair train is on a track (not at station)
                 Track track = tracks.get(currentLocation);
-                if (track != null && track.getType() == TrackType.BROKEN 
-                    && !tracksJustBroken.contains(track.getTrackId())) {
-                    // Apply mechanic boost (2 per mechanic)
+                if (track != null && track.getType() == TrackType.BROKEN
+                        && !tracksJustBroken.contains(track.getTrackId())) {
                     int mechanicCount = repairTrain.getMechanicCount();
                     if (mechanicCount > 0) {
                         int repairBoost = mechanicCount * 2;
@@ -561,8 +508,6 @@ public class TrainsController {
             }
         }
 
-        // Then, apply base repair to all broken tracks (1 per tick)
-        // But NOT to tracks that just broke this tick
         for (Track track : tracks.values()) {
             if (track.getType() == TrackType.BROKEN && !tracksJustBroken.contains(track.getTrackId())) {
                 track.repair(1); // Base repair rate
